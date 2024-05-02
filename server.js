@@ -1,60 +1,21 @@
+// @ts-ignore
 // Virtual entry point for the app
-import * as remixBuild from '@remix-run/dev/server-build';
+import * as remixBuild from 'virtual:remix/server-build';
+import {
+  createRequestHandler,
+  getStorefrontHeaders,
+} from '@shopify/remix-oxygen';
 import {
   cartGetIdDefault,
   cartSetIdDefault,
   createCartHandler,
   createStorefrontClient,
   storefrontRedirect,
+  createCustomerAccountClient,
 } from '@shopify/hydrogen';
-import {
-  createRequestHandler,
-  getStorefrontHeaders,
-  createCookieSessionStorage,
-} from '@shopify/remix-oxygen';
 
-/** The getLoadContext is used both here in server.js, and by Utopia's storyboard.js */
-export const getLoadContext =
-  (env, executionContext, mockCartID) => async (request) => {
-    const waitUntil = executionContext.waitUntil.bind(executionContext);
-    const [cache, session] = await Promise.all([
-      caches.open('hydrogen'),
-      HydrogenSession.init(request, [env.SESSION_SECRET]),
-    ]);
-
-    /**
-     * Create Hydrogen's Storefront client.
-     */
-    const {storefront} = createStorefrontClient({
-      cache,
-      waitUntil,
-      i18n: getLocaleFromRequest(request),
-      publicStorefrontToken: env.PUBLIC_STOREFRONT_API_TOKEN,
-      privateStorefrontToken: env.PRIVATE_STOREFRONT_API_TOKEN,
-      storeDomain: env.PUBLIC_STORE_DOMAIN,
-      storefrontId: env.PUBLIC_STOREFRONT_ID,
-      storefrontHeaders: getStorefrontHeaders(request),
-    });
-
-    /*
-     * Create a cart handler that will be used to
-     * create and update the cart in the session.
-     */
-
-    const IS_TEST_ENVIRONMENT = typeof window !== 'undefined';
-
-    const cart = createCartHandler({
-      storefront,
-      getCartId:
-        mockCartID != null
-          ? () => mockCartID
-          : cartGetIdDefault(request.headers),
-      setCartId: IS_TEST_ENVIRONMENT ? () => {} : cartSetIdDefault(),
-      cartQueryFragment: CART_QUERY_FRAGMENT,
-    });
-
-    return {session, storefront, cart, env, waitUntil};
-  };
+import {AppSession} from '~/lib/session.server';
+import {getLocaleFromRequest} from '~/lib/utils';
 
 /**
  * Export a fetch handler in module format.
@@ -74,8 +35,43 @@ export default {
         throw new Error('SESSION_SECRET environment variable is not set');
       }
 
-      // this is pretty ugly but we need to pre-create the Remix Context to have access to the storefront later in this function
-      const loadContext = getLoadContext(env, executionContext)(request);
+      const waitUntil = executionContext.waitUntil.bind(executionContext);
+      const [cache, session] = await Promise.all([
+        caches.open('hydrogen'),
+        AppSession.init(request, [env.SESSION_SECRET]),
+      ]);
+
+      /**
+       * Create Hydrogen's Storefront client.
+       */
+      const {storefront} = createStorefrontClient({
+        cache,
+        waitUntil,
+        i18n: getLocaleFromRequest(request),
+        publicStorefrontToken: env.PUBLIC_STOREFRONT_API_TOKEN,
+        privateStorefrontToken: env.PRIVATE_STOREFRONT_API_TOKEN,
+        storeDomain: env.PUBLIC_STORE_DOMAIN,
+        storefrontId: env.PUBLIC_STOREFRONT_ID,
+        storefrontHeaders: getStorefrontHeaders(request),
+      });
+
+      /**
+       * Create a client for Customer Account API.
+       */
+      const customerAccount = createCustomerAccountClient({
+        waitUntil,
+        request,
+        session,
+        customerAccountId: env.PUBLIC_CUSTOMER_ACCOUNT_API_CLIENT_ID,
+        customerAccountUrl: env.PUBLIC_CUSTOMER_ACCOUNT_API_URL,
+      });
+
+      const cart = createCartHandler({
+        storefront,
+        customerAccount,
+        getCartId: cartGetIdDefault(request.headers),
+        setCartId: cartSetIdDefault(),
+      });
 
       /**
        * Create a Remix request handler and pass
@@ -84,7 +80,14 @@ export default {
       const handleRequest = createRequestHandler({
         build: remixBuild,
         mode: process.env.NODE_ENV,
-        getLoadContext: () => loadContext,
+        getLoadContext: () => ({
+          session,
+          waitUntil,
+          storefront,
+          customerAccount,
+          cart,
+          env,
+        }),
       });
 
       const response = await handleRequest(request);
@@ -95,11 +98,7 @@ export default {
          * If the redirect doesn't exist, then `storefrontRedirect`
          * will pass through the 404 response.
          */
-        return storefrontRedirect({
-          request,
-          response,
-          storefront: loadContext.storefront,
-        });
+        return storefrontRedirect({request, response, storefront});
       }
 
       return response;
@@ -110,198 +109,3 @@ export default {
     }
   },
 };
-
-/**
- * @returns {I18nLocale}
- * @param {Request} request
- */
-function getLocaleFromRequest(request) {
-  const defaultLocale = {language: 'EN', country: 'US'};
-  const supportedLocales = {
-    ES: 'ES',
-    FR: 'FR',
-    DE: 'DE',
-    JP: 'JA',
-  };
-
-  const url = new URL(request.url);
-  const firstSubdomain = url.hostname.split('.')[0]?.toUpperCase();
-
-  return supportedLocales[firstSubdomain]
-    ? {language: supportedLocales[firstSubdomain], country: firstSubdomain}
-    : defaultLocale;
-}
-
-/**
- * This is a custom session implementation for your Hydrogen shop.
- * Feel free to customize it to your needs, add helper methods, or
- * swap out the cookie-based implementation with something else!
- */
-export class HydrogenSession {
-  #sessionStorage;
-  #session;
-
-  /**
-   * @param {SessionStorage} sessionStorage
-   * @param {Session} session
-   */
-  constructor(sessionStorage, session) {
-    this.#sessionStorage = sessionStorage;
-    this.#session = session;
-  }
-
-  /**
-   * @static
-   * @param {Request} request
-   * @param {string[]} secrets
-   */
-  static async init(request, secrets) {
-    const storage = createCookieSessionStorage({
-      cookie: {
-        name: 'session',
-        httpOnly: true,
-        path: '/',
-        sameSite: 'lax',
-        secrets,
-      },
-    });
-
-    const session = await storage.getSession(request.headers.get('Cookie'));
-
-    return new this(storage, session);
-  }
-
-  get has() {
-    return this.#session.has;
-  }
-
-  get get() {
-    return this.#session.get;
-  }
-
-  get flash() {
-    return this.#session.flash;
-  }
-
-  get unset() {
-    return this.#session.unset;
-  }
-
-  get set() {
-    return this.#session.set;
-  }
-
-  destroy() {
-    return this.#sessionStorage.destroySession(this.#session);
-  }
-
-  commit() {
-    return this.#sessionStorage.commitSession(this.#session);
-  }
-}
-
-// NOTE: https://shopify.dev/docs/api/storefront/latest/queries/cart
-const CART_QUERY_FRAGMENT = `#graphql
-  fragment Money on MoneyV2 {
-    currencyCode
-    amount
-  }
-  fragment CartLine on CartLine {
-    id
-    quantity
-    attributes {
-      key
-      value
-    }
-    cost {
-      totalAmount {
-        ...Money
-      }
-      amountPerQuantity {
-        ...Money
-      }
-      compareAtAmountPerQuantity {
-        ...Money
-      }
-    }
-    merchandise {
-      ... on ProductVariant {
-        id
-        availableForSale
-        compareAtPrice {
-          ...Money
-        }
-        price {
-          ...Money
-        }
-        requiresShipping
-        title
-        image {
-          id
-          url
-          altText
-          width
-          height
-
-        }
-        product {
-          handle
-          title
-          id
-        }
-        selectedOptions {
-          name
-          value
-        }
-      }
-    }
-  }
-  fragment CartApiQuery on Cart {
-    id
-    checkoutUrl
-    totalQuantity
-    buyerIdentity {
-      countryCode
-      customer {
-        id
-        email
-        firstName
-        lastName
-        displayName
-      }
-      email
-      phone
-    }
-    lines(first: $numCartLines) {
-      nodes {
-        ...CartLine
-      }
-    }
-    cost {
-      subtotalAmount {
-        ...Money
-      }
-      totalAmount {
-        ...Money
-      }
-      totalDutyAmount {
-        ...Money
-      }
-      totalTaxAmount {
-        ...Money
-      }
-    }
-    note
-    attributes {
-      key
-      value
-    }
-    discountCodes {
-      code
-      applicable
-    }
-  }
-`;
-
-/** @typedef {import('@shopify/remix-oxygen').SessionStorage} SessionStorage */
-/** @typedef {import('@shopify/remix-oxygen').Session} Session */

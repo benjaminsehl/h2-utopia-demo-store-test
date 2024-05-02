@@ -1,15 +1,9 @@
-/**
- * @param {LoaderFunctionArgs}
- */
-export async function loader({request}) {
-  throw new Response(`${new URL(request.url).pathname} not found`, {
-    status: 404,
-  });
+export async function loader() {
+  throw new Response('Not found', {status: 404});
 }
 
-export default function CatchAllPage() {
+export default function Component() {
   return null;
 }
 
-/** @typedef {import('@shopify/remix-oxygen').LoaderFunctionArgs} LoaderFunctionArgs */
 /** @typedef {import('@shopify/remix-oxygen').SerializeFrom<typeof loader>} LoaderReturnData */
